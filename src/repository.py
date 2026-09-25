@@ -47,6 +47,14 @@ class Repository:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS service_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+                    request_id TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(record_id, request_id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
                 """
@@ -92,7 +100,7 @@ class Repository:
                 rows = connection.execute("SELECT * FROM records ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self._row(row) for row in rows]
 
-    def mutate(self, record_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any]) -> Dict[str, Any]:
+    def mutate(self, record_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -112,9 +120,24 @@ class Repository:
                 "INSERT INTO audit_events(record_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
                 (record_id, action, actor_id, version, json.dumps(details, ensure_ascii=False, sort_keys=True), now),
             )
-            result = connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+            result = self._row(connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone())
+            if request_id is not None:
+                connection.execute(
+                    "INSERT INTO service_requests(record_id,request_id,result,created_at) VALUES(?,?,?,?)",
+                    (record_id, request_id, json.dumps(result, ensure_ascii=False, sort_keys=True), now),
+                )
             connection.commit()
-        return self._row(result)
+        return result
+
+    def find_request_result(self, record_id: int, request_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result FROM service_requests WHERE record_id=? AND request_id=?",
+                (record_id, request_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["result"])
 
     def add_audit(self, record_id: int, actor_id: str, action: str, details: Dict[str, Any]) -> None:
         with self._connect() as connection:
@@ -136,11 +159,6 @@ class Repository:
             item["details"] = json.loads(item["details"])
             result.append(item)
         return result
-
-    def stats(self) -> Dict[str, int]:
-        with self._connect() as connection:
-            rows = connection.execute("SELECT state, COUNT(*) AS total FROM records GROUP BY state").fetchall()
-        return {str(row["state"]): int(row["total"]) for row in rows}
 
     def health(self) -> bool:
         try:

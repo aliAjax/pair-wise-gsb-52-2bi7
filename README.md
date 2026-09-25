@@ -29,9 +29,16 @@ python3 app.py --db ./data.db --port 8328
 - `GET /api/records`：记录列表，可带`state`和`limit`参数。
 - `GET /api/records/{id}`：记录详情。
 - `GET /api/records/{id}/audit`：审计时间线。
-- `GET /api/stats`：状态统计。
+- `GET /api/stats`：统计，返回`{"by_state":{状态:数量},"overdue":逾期数,"normal":正常数}`。
 - `POST /api/records`：创建记录，请求体为`{"reference":"...","data":{...}}`。
 - `POST /api/records/{id}/actions/{action}`：执行业务动作，请求体为`{"expected_version":1,"data":{...}}`。
+
+## 补录幂等与复查期限
+
+- `log_service`（补录）的`data`必须携带`request_id`请求编号。同一记录同一编号重复提交（如网络重试）直接返回第一次的结果，不重复增加已服务分钟，也不新增审计时间线。不同编号各自正常登记。
+- 补录分钟数超过计划剩余分钟时返回校验错误，错误信息注明还可登记多少分钟；当前记录（分钟数与版本）原样保留。
+- `review`（管理员完成复查）的`data`必须填写`next_review_date`（格式`YYYY-MM-DD`，下一次复查日期），缺失或格式非法都会被拒绝。
+- 列表与详情中的`payload.review_overdue`在读取时根据`next_review_date`实时计算：日期尚未设置、格式无效、或早于当天的计划均算逾期；当天或未来日期算正常。统计接口按同一规则汇总`overdue`/`normal`。
 
 除`/health`和`/`外，请求需提供`X-User-Id`、`X-Role`，可选`X-Org`。
 

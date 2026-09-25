@@ -1,5 +1,6 @@
 """特殊教育支持计划合规领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+from datetime import date
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
 
@@ -8,6 +9,19 @@ INITIAL_STATE = "draft"
 CREATE_ROLES = {'case_manager'}
 ACTION_ROLES = {'consent': {'parent_rep'}, 'activate': {'case_manager'}, 'log_service': {'case_manager', 'specialist'}, 'review': {'administrator'}, 'amend': {'case_manager'}, 'close': {'administrator'}}
 TRANSITIONS = {'consent': {'draft': 'consented'}, 'activate': {'consented': 'active'}, 'log_service': {'active': 'active'}, 'review': {'active': 'under_review'}, 'amend': {'under_review': 'active'}, 'close': {'active': 'closed', 'under_review': 'closed'}}
+
+
+def parse_review_date(value: Any) -> Optional[date]:
+    """解析复查日期（YYYY-MM-DD），缺失或非法时返回None。"""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 class DomainRules:
@@ -42,9 +56,15 @@ class DomainRules:
         p = self.validate_create(payload)
         p["missing_minutes"] = max(0, int(p["service_minutes"]) - int(p["delivered_minutes"]))
         p["compliance_rate"] = round(int(p["delivered_minutes"]) / int(p["service_minutes"]) * 100, 2)
-        p["review_overdue"] = int(p["review_due_days"]) <= 0
         p["plan_status"] = "draft"
         return p
+
+    def is_review_overdue(self, payload: Dict[str, Any], today: Optional[date] = None) -> bool:
+        """逾期判定：复查日期尚未设置或无效算逾期，有效日期早于今天也算逾期。"""
+        due = parse_review_date(payload.get("next_review_date"))
+        if due is None:
+            return True
+        return due < (today or date.today())
 
     def check_create_conflicts(self, payload: Dict[str, Any], existing: Iterable[Dict[str, Any]]) -> None:
         for item in existing:
@@ -79,18 +99,24 @@ class DomainRules:
             changes["plan_status"] = "active"
             summary = "支持计划生效"
         elif action == "log_service":
+            text(data, "request_id")
             session = integer(data, "session_minutes", 1)
-            if session + int(p["delivered_minutes"]) > int(p["service_minutes"]):
-                raise ValidationError("记录服务超过计划分钟数")
-            changes["delivered_minutes"] = int(p["delivered_minutes"]) + session
+            delivered = int(p["delivered_minutes"])
+            remaining = int(p["service_minutes"]) - delivered
+            if session > remaining:
+                raise ValidationError("记录服务超过计划分钟数，还可登记%s分钟" % remaining)
+            changes["delivered_minutes"] = delivered + session
             changes["last_provider"] = text(data, "provider")
             changes["missing_minutes"] = int(p["service_minutes"]) - changes["delivered_minutes"]
             changes["compliance_rate"] = round(changes["delivered_minutes"] / int(p["service_minutes"]) * 100, 2)
             summary = "服务记录已登记"
         elif action == "review":
             changes["progress_note"] = text(data, "progress_note")
-            changes["review_overdue"] = False
-            summary = "进入计划复查"
+            next_review = text(data, "next_review_date")
+            if parse_review_date(next_review) is None:
+                raise ValidationError("下一次复查日期无效，需为YYYY-MM-DD")
+            changes["next_review_date"] = next_review
+            summary = "复查完成，已设定下次复查日期"
         elif action == "amend":
             changes["amendment_reason"] = text(data, "amendment_reason")
             changes["updated_goals"] = text_list(data, "updated_goals", 1)

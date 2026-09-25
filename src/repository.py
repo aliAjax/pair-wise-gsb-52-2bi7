@@ -47,6 +47,14 @@ class Repository:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS idempotency_keys (
+                    record_id INTEGER NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    response TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (record_id, action, request_id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
                 """
@@ -92,10 +100,29 @@ class Repository:
                 rows = connection.execute("SELECT * FROM records ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self._row(row) for row in rows]
 
-    def mutate(self, record_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any]) -> Dict[str, Any]:
+    def get_idempotent_response(self, record_id: int, action: str, request_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT response FROM idempotency_keys WHERE record_id=? AND action=? AND request_id=?",
+                (record_id, action, request_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["response"])
+
+    def mutate(self, record_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any], idempotency: Optional[tuple] = None) -> Dict[str, Any]:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if idempotency is not None:
+                key_action, request_id = idempotency
+                row = connection.execute(
+                    "SELECT response FROM idempotency_keys WHERE record_id=? AND action=? AND request_id=?",
+                    (record_id, key_action, request_id),
+                ).fetchone()
+                if row is not None:
+                    connection.commit()
+                    return json.loads(row["response"])
             row = connection.execute("SELECT version FROM records WHERE id=?", (record_id,)).fetchone()
             if row is None:
                 connection.rollback()
@@ -113,8 +140,14 @@ class Repository:
                 (record_id, action, actor_id, version, json.dumps(details, ensure_ascii=False, sort_keys=True), now),
             )
             result = connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+            response = self._row(result)
+            if idempotency is not None:
+                connection.execute(
+                    "INSERT INTO idempotency_keys(record_id,action,request_id,response,created_at) VALUES(?,?,?,?,?)",
+                    (record_id, key_action, request_id, json.dumps(response, ensure_ascii=False, sort_keys=True), now),
+                )
             connection.commit()
-        return self._row(result)
+        return response
 
     def add_audit(self, record_id: int, actor_id: str, action: str, details: Dict[str, Any]) -> None:
         with self._connect() as connection:

@@ -33,6 +33,11 @@ python3 app.py --db ./data.db --port 8328
 - `POST /api/records`：创建记录，请求体为`{"reference":"...","data":{...}}`。
 - `POST /api/records/{id}/actions/{action}`：执行业务动作，请求体为`{"expected_version":1,"data":{...}}`。
 
+业务约定：
+
+- `log_service`（补录服务）必须在`data`中携带`request_id`请求编号。同一编号重复提交时返回第一次的结果，不重复累计已服务分钟，也不新增时间线；补录超过计划分钟时记录保持原样，错误信息中会说明剩余分钟数。
+- `review`（管理员复查）必须在`data`中携带`next_review_date`（`YYYY-MM-DD`）作为下一次复查日期。列表、详情和统计据此计算`review_overdue`：日期未设置、无效或早于今天都算逾期；统计接口额外返回`review_overdue`/`review_normal`数量。
+
 除`/health`和`/`外，请求需提供`X-User-Id`、`X-Role`，可选`X-Org`。
 
 ## 测试

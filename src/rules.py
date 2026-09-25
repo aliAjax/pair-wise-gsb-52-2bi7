@@ -1,7 +1,25 @@
 """特殊教育支持计划合规领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+import re
+from datetime import date, datetime
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
+
+
+REVIEW_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_review_date(value: Any) -> Optional[date]:
+    """解析YYYY-MM-DD格式的复查日期，无效时返回None。"""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not REVIEW_DATE_PATTERN.match(value):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 INITIAL_STATE = "draft"
@@ -38,11 +56,18 @@ class DomainRules:
             raise ValidationError("已提供服务不能超过计划服务")
         return p
 
+    def is_review_overdue(self, payload: Dict[str, Any], today: date = None) -> bool:
+        """复查日期未设置、无效或早于今天都视为逾期。"""
+        parsed = parse_review_date(payload.get("next_review_date"))
+        if parsed is None:
+            return True
+        return parsed < (today or date.today())
+
     def prepare_create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         p = self.validate_create(payload)
         p["missing_minutes"] = max(0, int(p["service_minutes"]) - int(p["delivered_minutes"]))
         p["compliance_rate"] = round(int(p["delivered_minutes"]) / int(p["service_minutes"]) * 100, 2)
-        p["review_overdue"] = int(p["review_due_days"]) <= 0
+        p["review_overdue"] = self.is_review_overdue(p)
         p["plan_status"] = "draft"
         return p
 
@@ -80,16 +105,23 @@ class DomainRules:
             summary = "支持计划生效"
         elif action == "log_service":
             session = integer(data, "session_minutes", 1)
-            if session + int(p["delivered_minutes"]) > int(p["service_minutes"]):
-                raise ValidationError("记录服务超过计划分钟数")
-            changes["delivered_minutes"] = int(p["delivered_minutes"]) + session
+            delivered = int(p["delivered_minutes"])
+            planned = int(p["service_minutes"])
+            if session + delivered > planned:
+                raise ValidationError("记录服务超过计划分钟数，还剩%s分钟" % (planned - delivered))
+            changes["delivered_minutes"] = delivered + session
             changes["last_provider"] = text(data, "provider")
-            changes["missing_minutes"] = int(p["service_minutes"]) - changes["delivered_minutes"]
-            changes["compliance_rate"] = round(changes["delivered_minutes"] / int(p["service_minutes"]) * 100, 2)
+            changes["missing_minutes"] = planned - changes["delivered_minutes"]
+            changes["compliance_rate"] = round(changes["delivered_minutes"] / planned * 100, 2)
             summary = "服务记录已登记"
         elif action == "review":
             changes["progress_note"] = text(data, "progress_note")
-            changes["review_overdue"] = False
+            next_review_date = text(data, "next_review_date")
+            parsed = parse_review_date(next_review_date)
+            if parsed is None:
+                raise ValidationError("next_review_date必须是YYYY-MM-DD格式的有效日期")
+            changes["next_review_date"] = next_review_date
+            changes["review_overdue"] = parsed < date.today()
             summary = "进入计划复查"
         elif action == "amend":
             changes["amendment_reason"] = text(data, "amendment_reason")

@@ -5,7 +5,7 @@ from src.rules import DomainRules
 
 
 CREATE_DATA = {'student_id': 'S-100', 'disability': 'hearing', 'service_minutes': 600, 'delivered_minutes': 120, 'review_due_days': 15, 'goals_count': 4, 'consent': False}
-FLOW = [('consent', 'parent_rep', {'guardian_confirmed': True, 'consent_scope': '个别化服务'}, 'consented'), ('activate', 'case_manager', {}, 'active'), ('log_service', 'specialist', {'session_minutes': 60, 'provider': 'SP-3'}, 'active'), ('review', 'administrator', {'progress_note': '阶段复盘'}, 'under_review'), ('amend', 'case_manager', {'amendment_reason': '调整目标', 'updated_goals': ['目标A', '目标B']}, 'active'), ('close', 'administrator', {'review_complete': True}, 'closed')]
+FLOW = [('consent', 'parent_rep', {'guardian_confirmed': True, 'consent_scope': '个别化服务'}, 'consented'), ('activate', 'case_manager', {}, 'active'), ('log_service', 'specialist', {'session_minutes': 60, 'provider': 'SP-3', 'request_id': 'REQ-0001'}, 'active'), ('review', 'administrator', {'progress_note': '阶段复盘', 'next_review_date': '2099-12-31'}, 'under_review'), ('amend', 'case_manager', {'amendment_reason': '调整目标', 'updated_goals': ['目标A', '目标B']}, 'active'), ('close', 'administrator', {'review_complete': True}, 'closed')]
 
 
 class RulesTest(unittest.TestCase):
@@ -16,7 +16,8 @@ class RulesTest(unittest.TestCase):
         prepared = self.rules.prepare_create(CREATE_DATA)
         self.assertEqual(prepared["missing_minutes"], 480)
         self.assertEqual(prepared["compliance_rate"], 20.0)
-        self.assertFalse(prepared["review_overdue"])
+        # 尚未设置下一次复查日期的计划算逾期
+        self.assertTrue(prepared["review_overdue"])
 
     def test_action_calculation(self):
         action, role, data, expected_state = FLOW[0]

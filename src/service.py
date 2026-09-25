@@ -36,12 +36,17 @@ class Service:
     def list_records(self, actor: Actor, state: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
-        return self.repository.list_records(state=state, limit=limit)
+        records = self.repository.list_records(state=state, limit=limit)
+        for record in records:
+            record["payload"]["review_overdue"] = self.rules.is_review_overdue(record["payload"])
+        return records
 
     def get_record(self, actor: Actor, record_id: int) -> Dict[str, Any]:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
-        return self.repository.get(record_id)
+        record = self.repository.get(record_id)
+        record["payload"]["review_overdue"] = self.rules.is_review_overdue(record["payload"])
+        return record
 
     def act(self, actor: Actor, record_id: int, expected_version: int, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
         actor = self._actor(actor)
@@ -49,9 +54,17 @@ class Service:
         action = text({"action": action}, "action")
         if not self.rules.role_can_action(actor.role, action):
             raise PermissionDenied("角色无权执行该操作")
+        data = dict(data or {})
+        idempotency = None
+        if action == "log_service":
+            request_id = text(data, "request_id")
+            cached = self.repository.get_idempotent_response(record_id, action, request_id)
+            if cached is not None:
+                return cached
+            idempotency = (action, request_id)
         record = self.repository.get(record_id)
         self.rules.require_transition(record, action)
-        new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})
+        new_state, new_payload, summary = self.rules.apply_action(record, action, data)
         return self.repository.mutate(
             record_id=record_id,
             expected_version=int(expected_version),
@@ -59,7 +72,8 @@ class Service:
             payload=new_payload,
             actor_id=actor.user_id,
             action=action,
-            details={"summary": summary, "input": data or {}, "from": record["state"], "to": new_state},
+            details={"summary": summary, "input": data, "from": record["state"], "to": new_state},
+            idempotency=idempotency,
         )
 
     def timeline(self, actor: Actor, record_id: int) -> List[Dict[str, Any]]:
@@ -70,4 +84,9 @@ class Service:
     def stats(self, actor: Actor) -> Dict[str, int]:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
-        return self.repository.stats()
+        stats = self.repository.stats()
+        records = self.repository.list_records(limit=500)
+        overdue = sum(1 for record in records if self.rules.is_review_overdue(record["payload"]))
+        stats["review_overdue"] = overdue
+        stats["review_normal"] = len(records) - overdue
+        return stats
